@@ -5,6 +5,7 @@
 ## can call it like any other library function.
 import https
 import interop
+import json
 
 pub let invalid = https.invalid
 
@@ -56,70 +57,30 @@ func put_json(buf: u8[], pos: usize*, s: str):
             buf[*pos] = c
             *pos += 1
 
-func find(hay: const u8[], from_index: usize, needle: const u8[]) -> usize:
-    var i = from_index
-    while i + needle.length <= hay.length:
-        var hit = true
-        for j in 0..<needle.length:
-            if hay[i + j] != needle[j]:
-                hit = false
-                break
-        if hit:
-            return i
-        i += 1
-    return hay.length
+## The assistant text of a chat completion: choices[0].message.content. Decoded with
+## the JSON library, so nested tool-call objects and every escape parse correctly.
+func extract_content(body: str, out: u8[], out_len: usize*) -> bool!:
+    let document = try json.decode(body)
+    defer document.release()
+    let root = (try document.get()).root()
+    let choices = root.member("choices") else return false
+    let first = choices.at(0) else return false
+    let message = first.member("message") else return false
+    let content = message.member("content") else return false
+    let text = content.text() else return false
+    write_msg(out, out_len, text)
+    return true
 
-## Decode the JSON string that begins just after `open` (the position of its opening
-## quote) into `out`, returning its length. Handles the common escapes.
-func decode_string(hay: const u8[], open: usize, out: u8[]) -> usize:
-    var i = open + 1
-    var written: usize = 0
-    while i < hay.length and hay[i] != 34 and written + 4 < out.length:
-        if hay[i] == 92 and i + 1 < hay.length:
-            let e = hay[i + 1]
-            if e == 110:
-                out[written] = 10
-            elif e == 116:
-                out[written] = 9
-            elif e == 114:
-                out[written] = 13
-            elif e == 117 and i + 5 < hay.length:
-                written += decode_unicode(hay, i + 2, out, written)
-                i += 6
-                continue
-            else:
-                out[written] = e
-            written += 1
-            i += 2
-        else:
-            out[written] = hay[i]
-            written += 1
-            i += 1
-    return written
-
-func hex_digit(c: u8) -> u32:
-    if c >= 48 and c <= 57:
-        return (u32)(c - 48)
-    if c >= 97 and c <= 102:
-        return (u32)(c - 87)
-    if c >= 65 and c <= 70:
-        return (u32)(c - 55)
-    return 0
-
-## Decode a \uXXXX escape at `at` (the first hex digit) into UTF-8 at out[written..].
-func decode_unicode(hay: const u8[], at: usize, out: u8[], written: usize) -> usize:
-    let code = (hex_digit(hay[at]) << 12) | (hex_digit(hay[at + 1]) << 8) | (hex_digit(hay[at + 2]) << 4) | hex_digit(hay[at + 3])
-    if code < 0x80:
-        out[written] = (u8)code
-        return 1
-    if code < 0x800:
-        out[written] = (u8)(0xc0 | (code >> 6))
-        out[written + 1] = (u8)(0x80 | (code & 0x3f))
-        return 2
-    out[written] = (u8)(0xe0 | (code >> 12))
-    out[written + 1] = (u8)(0x80 | ((code >> 6) & 0x3f))
-    out[written + 2] = (u8)(0x80 | (code & 0x3f))
-    return 3
+## The provider's error text: error.message, present when a request is rejected.
+func extract_error(body: str, out: u8[], out_len: usize*) -> bool!:
+    let document = try json.decode(body)
+    defer document.release()
+    let root = (try document.get()).root()
+    let problem = root.member("error") else return false
+    let message = problem.member("message") else return false
+    let text = message.text() else return false
+    write_msg(out, out_len, text)
+    return true
 
 func write_msg(out: u8[], out_len: usize*, s: str):
     let n = s.length if s.length < out.length else out.length
@@ -168,18 +129,16 @@ pub func complete_into(api_key: str, model: str, system: str, prompt: str, out: 
     if failed:
         return
     if result.status != 200:
-        let key = find(response[..<result.length], 0, b"\"message\":\"")
-        if key < result.length:
-            *out_len = decode_string(response[..<result.length], key + 10, out)
-        else:
+        let shown = extract_error((str)response[..<result.length], out, out_len) catch failure:
+            recover false
+        if not shown:
             write_msg(out, out_len, "OpenRouter request was rejected.")
         return
-    let message = find(response[..<result.length], 0, b"\"message\"")
-    let content = find(response[..<result.length], message, b"\"content\":\"")
-    if content >= result.length:
+    let shown = extract_content((str)response[..<result.length], out, out_len) catch failure:
+        recover false
+    if not shown:
         write_msg(out, out_len, "No assistant message in the OpenRouter response.")
         return
-    *out_len = decode_string(response[..<result.length], content + 10, out)
     *ok = true
 
 ## Ask a model for a completion, returning the assistant text or failing with the

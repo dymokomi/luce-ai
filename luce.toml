@@ -5,6 +5,7 @@ source = "src"
 [dependencies]
 luce_config = "../luce-config"
 luce_http_client = "../luce-http-client"
+luce_json = "../luce-json"
 
 [exports]
 config = "luce_ai.config"
