@@ -303,5 +303,10 @@ pub func tool_arg(index: i64, key: str) -> interop.Owned[str]!:
     defer document.release()
     let root = (try document.get()).root()
     let field = root.member(key) else return try interop.copy_text("")
-    let text = field.text() else return try interop.copy_text("")
-    return try interop.copy_text(text)
+    if let text = field.text():
+        return try interop.copy_text(text)
+    if let number = field.number_text():
+        return try interop.copy_text(number)
+    if let flag = field.boolean():
+        return try interop.copy_text("true" if flag else "false")
+    return try interop.copy_text("")

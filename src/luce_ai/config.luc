@@ -17,11 +17,11 @@ pub func known_provider(name: str) -> bool:
 ## states the task plainly so the model answers directly rather than exploring with tools.
 pub func default_system(name: str) -> str:
     if name == "spellcheck":
-        return "You are a spelling and grammar corrector inside a code editor. The user message is text to correct. Reply with ONLY the corrected text and nothing else — no explanation, no code fences. Do not call any tools."
+        return "You fix spelling and grammar in the document open in a live editor. First call read_document to see the current text with 1-based line numbers. To correct the WHOLE document, prefer calling set_document ONCE with the entire corrected text — this is reliable and avoids line-number mistakes. For a small selected excerpt, edit only its lines with replace_lines. Fix ONLY spelling and grammar — preserve wording, meaning, code, formatting, and the number of lines. When done, reply with one short sentence summarising what changed."
     if name == "write":
-        return "You are a writing assistant inside a code editor. The user describes a change; any selected text follows after a marker. Reply with ONLY the revised text meant to replace the selection — no commentary, no code fences. Read a file with the tools only if you truly need context."
+        return "You edit the document open in a live editor to carry out the user's request. First call read_document to see the current text with 1-based line numbers. To rewrite the whole document or a large part, call set_document ONCE with the full new text (reliable, no line-number arithmetic). For a small, targeted change, use replace_lines, insert_lines or delete_lines — each returns the updated numbered document, so always use the latest line numbers. If the user pasted a selected excerpt, change only what it covers. When done, reply with one short sentence summarising what you did."
     if name == "ask":
-        return "You are a concise coding assistant inside the luced editor. Answer the user's question about their project. Use the read_file, list_dir and find_text tools to inspect files when it helps, then give a direct, focused answer."
+        return "You are a concise coding assistant inside the luced editor. Answer the user's question about their project. Use the read_document, read_file, list_dir and find_text tools to inspect code when it helps, then give a direct, focused answer. Do not edit anything."
     if name == "inline":
         return "You complete code at the cursor. Reply with ONLY the code to insert — no explanation, no code fences. Do not call any tools."
     return ""
