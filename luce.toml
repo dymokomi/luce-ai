@@ -4,6 +4,8 @@ source = "src"
 
 [dependencies]
 luce_config = "../luce-config"
+luce_http_client = "../luce-http-client"
 
 [exports]
 config = "luce_ai.config"
+openrouter = "luce_ai.openrouter"

@@ -1,0 +1,163 @@
+## The OpenRouter chat-completions client. It builds a request from a model, an
+## optional system prompt and a user prompt, sends it over the native HTTPS stack
+## (pinning Google's WE1 intermediate, which signs openrouter.ai's leaf), and
+## returns the assistant's reply. String in, owned string out, so the Luce editor
+## can call it like any other library function.
+import https
+import interop
+
+pub let invalid = https.invalid
+
+## A module-level buffer for dynamic error text, since an error message may not
+## borrow a function local. Single-threaded use only.
+var message_buffer: u8[1024]
+
+func fail(text: const u8[], count: usize) -> !:
+    let n = count if count < message_buffer.length else message_buffer.length
+    for i in 0..<n:
+        message_buffer[i] = text[i]
+    error(invalid, (str)message_buffer[..<n])
+
+## Google Trust Services WE1 (P-256), the intermediate that signs the openrouter.ai
+## leaf certificate. Pinned as the trust anchor; update if OpenRouter's issuer
+## changes. A production client would instead trust the root and validate the chain.
+let we1_x: u8[32] = [0x6f, 0xcd, 0x3a, 0xfe, 0x67, 0x57, 0x47, 0x4c, 0x21, 0x03, 0x85, 0x40, 0xc2, 0x47, 0x5d, 0xbb, 0x58, 0x47, 0x0f, 0x40, 0xc1, 0x5c, 0x17, 0x85, 0xc6, 0x19, 0x37, 0xe7, 0xd5, 0x7c, 0xed, 0x86]
+let we1_y: u8[32] = [0x4b, 0x9b, 0x81, 0xd9, 0xd7, 0x1a, 0x13, 0xa5, 0x0a, 0x03, 0xf8, 0x98, 0xc4, 0xc6, 0xe8, 0x9e, 0xff, 0x10, 0x59, 0x8f, 0x2c, 0x26, 0x98, 0xf5, 0xe6, 0x26, 0x25, 0xbb, 0x0f, 0x02, 0xfa, 0x56]
+
+func put_str(buf: u8[], pos: usize*, s: str):
+    for i in 0..<s.length:
+        buf[*pos + i] = s.bytes[i]
+    *pos += s.length
+
+## Append `s` as the interior of a JSON string, escaping what must be escaped.
+func put_json(buf: u8[], pos: usize*, s: str):
+    for i in 0..<s.length:
+        let c = s.bytes[i]
+        if c == 34 or c == 92:
+            buf[*pos] = 92
+            buf[*pos + 1] = c
+            *pos += 2
+        elif c == 10:
+            buf[*pos] = 92
+            buf[*pos + 1] = 110
+            *pos += 2
+        elif c == 13:
+            buf[*pos] = 92
+            buf[*pos + 1] = 114
+            *pos += 2
+        elif c == 9:
+            buf[*pos] = 92
+            buf[*pos + 1] = 116
+            *pos += 2
+        elif c < 32:
+            buf[*pos] = 32
+            *pos += 1
+        else:
+            buf[*pos] = c
+            *pos += 1
+
+func find(hay: const u8[], from_index: usize, needle: const u8[]) -> usize:
+    var i = from_index
+    while i + needle.length <= hay.length:
+        var hit = true
+        for j in 0..<needle.length:
+            if hay[i + j] != needle[j]:
+                hit = false
+                break
+        if hit:
+            return i
+        i += 1
+    return hay.length
+
+## Decode the JSON string that begins just after `open` (the position of its opening
+## quote) into `out`, returning its length. Handles the common escapes.
+func decode_string(hay: const u8[], open: usize, out: u8[]) -> usize:
+    var i = open + 1
+    var written: usize = 0
+    while i < hay.length and hay[i] != 34 and written + 4 < out.length:
+        if hay[i] == 92 and i + 1 < hay.length:
+            let e = hay[i + 1]
+            if e == 110:
+                out[written] = 10
+            elif e == 116:
+                out[written] = 9
+            elif e == 114:
+                out[written] = 13
+            elif e == 117 and i + 5 < hay.length:
+                written += decode_unicode(hay, i + 2, out, written)
+                i += 6
+                continue
+            else:
+                out[written] = e
+            written += 1
+            i += 2
+        else:
+            out[written] = hay[i]
+            written += 1
+            i += 1
+    return written
+
+func hex_digit(c: u8) -> u32:
+    if c >= 48 and c <= 57:
+        return (u32)(c - 48)
+    if c >= 97 and c <= 102:
+        return (u32)(c - 87)
+    if c >= 65 and c <= 70:
+        return (u32)(c - 55)
+    return 0
+
+## Decode a \uXXXX escape at `at` (the first hex digit) into UTF-8 at out[written..].
+func decode_unicode(hay: const u8[], at: usize, out: u8[], written: usize) -> usize:
+    let code = (hex_digit(hay[at]) << 12) | (hex_digit(hay[at + 1]) << 8) | (hex_digit(hay[at + 2]) << 4) | hex_digit(hay[at + 3])
+    if code < 0x80:
+        out[written] = (u8)code
+        return 1
+    if code < 0x800:
+        out[written] = (u8)(0xc0 | (code >> 6))
+        out[written + 1] = (u8)(0x80 | (code & 0x3f))
+        return 2
+    out[written] = (u8)(0xe0 | (code >> 12))
+    out[written + 1] = (u8)(0x80 | ((code >> 6) & 0x3f))
+    out[written + 2] = (u8)(0x80 | (code & 0x3f))
+    return 3
+
+## Ask a model for a completion. `system` may be empty. Returns the assistant text,
+## or fails with the provider's error message when the request is not accepted.
+pub func complete(api_key: str, model: str, system: str, prompt: str) -> interop.Owned[str]!:
+    if api_key.length == 0:
+        error(invalid, "no OpenRouter API key is configured")
+    if model.length == 0:
+        error(invalid, "no model is configured for this mode")
+    var body: u8[16384]
+    var bp: usize = 0
+    put_str(body, &bp, "{\"model\":\"")
+    put_json(body, &bp, model)
+    put_str(body, &bp, "\",\"messages\":[")
+    if system.length > 0:
+        put_str(body, &bp, "{\"role\":\"system\",\"content\":\"")
+        put_json(body, &bp, system)
+        put_str(body, &bp, "\"},")
+    put_str(body, &bp, "{\"role\":\"user\",\"content\":\"")
+    put_json(body, &bp, prompt)
+    put_str(body, &bp, "\"}]}")
+    var auth: u8[512]
+    var ap: usize = 0
+    put_str(auth, &ap, "Bearer ")
+    put_str(auth, &ap, api_key)
+    var response: u8[65536]
+    let result = try https.fetch("openrouter.ai", 443, we1_x, we1_y, "POST", "/api/v1/chat/completions",
+        (str)auth[..<ap], "application/json", body[..<bp], response)
+    var text: u8[16384]
+    if result.status != 200:
+        # OpenRouter errors carry {"error":{"message":"..."}}.
+        let key = find(response[..<result.length], 0, b"\"message\":\"")
+        if key < result.length:
+            let n = decode_string(response[..<result.length], key + 10, text)
+            try fail(text, n)
+        error(invalid, "OpenRouter request was rejected")
+    let message = find(response[..<result.length], 0, b"\"message\"")
+    let content = find(response[..<result.length], message, b"\"content\":\"")
+    if content >= result.length:
+        error(invalid, "no assistant message in the OpenRouter response")
+    let n = decode_string(response[..<result.length], content + 10, text)
+    return try interop.copy_text((str)text[..<n])
