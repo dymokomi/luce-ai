@@ -1,0 +1,86 @@
+## A single background AI request, so the editor never blocks on the network. One
+## request runs at a time: `begin` starts a worker thread, `done` is polled from the
+## UI each frame, and `take` collects the reply once it is ready. State is guarded by
+## a mutex; the heap and interop are thread-safe (the crypto suite proves it). Inputs
+## live in fixed buffers written before the thread starts, so no ownership crosses
+## the thread boundary.
+import thread
+import sync
+import interop
+import luce_ai.openrouter as openrouter
+
+pub let invalid = openrouter.invalid
+
+var lock: sync.Mutex
+var running: bool = false
+var finished: bool = false
+var result_buffer: u8[65536]
+var result_len: usize = 0
+var key_buffer: u8[1024]
+var key_len: usize = 0
+var model_buffer: u8[256]
+var model_len: usize = 0
+var system_buffer: u8[16384]
+var system_len: usize = 0
+var prompt_buffer: u8[16384]
+var prompt_len: usize = 0
+
+func copy_into(buffer: u8[], length: usize*, s: str):
+    let n = s.length if s.length < buffer.length else buffer.length
+    for i in 0..<n:
+        buffer[i] = s.bytes[i]
+    *length = n
+
+## Start a request unless one is already running. Returns whether it started.
+pub func begin(key: str, model: str, system: str, prompt: str) -> bool:
+    lock.lock()
+    if running:
+        lock.unlock()
+        return false
+    copy_into(key_buffer, &key_len, key)
+    copy_into(model_buffer, &model_len, model)
+    copy_into(system_buffer, &system_len, system)
+    copy_into(prompt_buffer, &prompt_len, prompt)
+    running = true
+    finished = false
+    lock.unlock()
+    let handle = thread.spawn(worker, none, stack = 2097152) catch failure:
+        lock.lock()
+        running = false
+        lock.unlock()
+        return false
+    handle.detach()
+    return true
+
+func worker(context: void*?):
+    discard(context)
+    var staging: u8[65536]
+    var length: usize = 0
+    var ok = false
+    openrouter.complete_into((str)key_buffer[..<key_len], (str)model_buffer[..<model_len],
+        (str)system_buffer[..<system_len], (str)prompt_buffer[..<prompt_len], staging, &length, &ok)
+    lock.lock()
+    for i in 0..<length:
+        result_buffer[i] = staging[i]
+    result_len = length
+    finished = true
+    running = false
+    lock.unlock()
+
+## Whether the running request has finished (poll this from the UI each frame).
+pub func done() -> bool:
+    lock.lock()
+    let value = finished
+    lock.unlock()
+    return value
+
+## Collect the finished reply (or the error message), and go idle again.
+pub func take() -> interop.Owned[str]!:
+    lock.lock()
+    let n = result_len
+    var staging: u8[65536]
+    for i in 0..<n:
+        staging[i] = result_buffer[i]
+    finished = false
+    lock.unlock()
+    return try interop.copy_text((str)staging[..<n])

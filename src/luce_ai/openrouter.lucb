@@ -121,13 +121,27 @@ func decode_unicode(hay: const u8[], at: usize, out: u8[], written: usize) -> us
     out[written + 2] = (u8)(0x80 | (code & 0x3f))
     return 3
 
-## Ask a model for a completion. `system` may be empty. Returns the assistant text,
-## or fails with the provider's error message when the request is not accepted.
-pub func complete(api_key: str, model: str, system: str, prompt: str) -> interop.Owned[str]!:
+func write_msg(out: u8[], out_len: usize*, s: str):
+    let n = s.length if s.length < out.length else out.length
+    for i in 0..<n:
+        out[i] = s.bytes[i]
+    *out_len = n
+
+func empty_response() -> https.Response:
+    return https.Response(status = 0, length = 0)
+
+## Ask a model for a completion, writing the reply into `out` and its length into
+## `out_len`. `ok` is set when the model answered; otherwise `out` holds an error
+## message. Never fails, so it is safe to run on a worker thread.
+pub func complete_into(api_key: str, model: str, system: str, prompt: str, out: u8[], out_len: usize*, ok: bool*):
+    *ok = false
+    *out_len = 0
     if api_key.length == 0:
-        error(invalid, "no OpenRouter API key is configured")
+        write_msg(out, out_len, "No OpenRouter API key is configured.")
+        return
     if model.length == 0:
-        error(invalid, "no model is configured for this mode")
+        write_msg(out, out_len, "No model is configured for this mode.")
+        return
     var body: u8[16384]
     var bp: usize = 0
     put_str(body, &bp, "{\"model\":\"")
@@ -145,19 +159,36 @@ pub func complete(api_key: str, model: str, system: str, prompt: str) -> interop
     put_str(auth, &ap, "Bearer ")
     put_str(auth, &ap, api_key)
     var response: u8[65536]
-    let result = try https.fetch("openrouter.ai", 443, we1_x, we1_y, "POST", "/api/v1/chat/completions",
-        (str)auth[..<ap], "application/json", body[..<bp], response)
-    var text: u8[16384]
+    var failed = false
+    let result = https.fetch("openrouter.ai", 443, we1_x, we1_y, "POST", "/api/v1/chat/completions",
+        (str)auth[..<ap], "application/json", body[..<bp], response) catch failure:
+        write_msg(out, out_len, failure.message)
+        failed = true
+        recover empty_response()
+    if failed:
+        return
     if result.status != 200:
-        # OpenRouter errors carry {"error":{"message":"..."}}.
         let key = find(response[..<result.length], 0, b"\"message\":\"")
         if key < result.length:
-            let n = decode_string(response[..<result.length], key + 10, text)
-            try fail(text, n)
-        error(invalid, "OpenRouter request was rejected")
+            *out_len = decode_string(response[..<result.length], key + 10, out)
+        else:
+            write_msg(out, out_len, "OpenRouter request was rejected.")
+        return
     let message = find(response[..<result.length], 0, b"\"message\"")
     let content = find(response[..<result.length], message, b"\"content\":\"")
     if content >= result.length:
-        error(invalid, "no assistant message in the OpenRouter response")
-    let n = decode_string(response[..<result.length], content + 10, text)
-    return try interop.copy_text((str)text[..<n])
+        write_msg(out, out_len, "No assistant message in the OpenRouter response.")
+        return
+    *out_len = decode_string(response[..<result.length], content + 10, out)
+    *ok = true
+
+## Ask a model for a completion, returning the assistant text or failing with the
+## provider's error message. Blocks; the async task module runs it on a thread.
+pub func complete(api_key: str, model: str, system: str, prompt: str) -> interop.Owned[str]!:
+    var out: u8[65536]
+    var length: usize = 0
+    var ok = false
+    complete_into(api_key, model, system, prompt, out, &length, &ok)
+    if not ok:
+        try fail(out, length)
+    return try interop.copy_text((str)out[..<length])
