@@ -1,16 +1,33 @@
-## AI configuration: which model answers each role, and how to reach each
-## provider. The schema is validated up front, like the editor's other settings,
-## and holds no network logic — credentials are stored, not resolved here, so a
-## key can be read from the environment only when a request is actually made.
+## AI configuration: for each mode, which provider and model answer it and the
+## system prompt that steers it; plus how to reach each provider. The schema is
+## validated up front, like the editor's other settings, and holds no network
+## logic — credentials are stored, not resolved here, so a key is read from the
+## environment only when a request is actually made.
 from toml import Table
 
 ## Configuration that does not match the declared AI schema.
 pub let invalid: ErrorCode = ErrorCode.package(310)
 
-## The providers a model role may name. Kept small on purpose; adding a provider
-## is a deliberate change, not an open set.
+## The providers a mode may name. Kept small on purpose; adding a provider is a
+## deliberate change, not an open set.
 pub func known_provider(name: str) -> bool:
     return name == "openrouter" or name == "claude_code"
+
+## One mode's settings: its provider (default openrouter), the model that answers
+## it, and the system prompt prepended to each request. `model` is the provider's
+## own id and may contain slashes (an OpenRouter id like "deepseek/deepseek-chat").
+pub class Mode:
+    pub let provider: str
+    pub let model: str
+    pub let system: str
+
+    pub func init(self, provider: str = "openrouter", model: str = "", system: str = ""):
+        self.provider = provider
+        self.model = model
+        self.system = system
+
+    pub func chosen(self) -> bool:
+        return self.model != ""
 
 ## How to reach one provider. A credential may be a literal `api_key` or the name
 ## of an environment variable in `key_env`; `command` names a local CLI provider.
@@ -34,25 +51,28 @@ pub class Provider:
     pub func configured(self) -> bool:
         return self.api_key != "" or self.key_env != "" or self.command != ""
 
-## The AI settings: a model per role and the known providers' details.
+## The AI settings: a mode per role and the known providers' details.
 pub class AiConfig:
-    pub let ask: str
-    pub let write: str
-    pub let spellcheck: str
-    pub let inline: str
+    pub let ask: Mode
+    pub let write: Mode
+    pub let spellcheck: Mode
+    pub let inline: Mode
     pub let openrouter: Provider
     pub let claude_code: Provider
 
     pub func init(self, source: str = "") -> unit!:
         let table = Table(source)
         table.check_within([
-            "models.ask", "models.write", "models.spellcheck", "models.inline",
+            "ask.provider", "ask.model", "ask.system",
+            "write.provider", "write.model", "write.system",
+            "spellcheck.provider", "spellcheck.model", "spellcheck.system",
+            "inline.provider", "inline.model", "inline.system",
             "openrouter.api_key", "openrouter.key_env", "openrouter.base_url",
             "claude_code.command", "claude_code.model"], [])
-        self.ask = table.string("models.ask", "")
-        self.write = table.string("models.write", "")
-        self.spellcheck = table.string("models.spellcheck", "")
-        self.inline = table.string("models.inline", "")
+        self.ask = read_mode(table, "ask")
+        self.write = read_mode(table, "write")
+        self.spellcheck = read_mode(table, "spellcheck")
+        self.inline = read_mode(table, "inline")
         self.openrouter = Provider("openrouter",
             api_key = table.string("openrouter.api_key", ""),
             key_env = table.string("openrouter.key_env", ""),
@@ -60,13 +80,14 @@ pub class AiConfig:
         self.claude_code = Provider("claude_code",
             command = table.string("claude_code.command", "claude"),
             key_env = "")
-        for role in ["ask", "write", "spellcheck", "inline"]:
-            let value = self.role(role)
-            if value != "" and not known_provider(provider_of(value)):
-                error(invalid, "Unknown provider in " + role + " = \"" + value + "\"; use openrouter or claude_code")
+        for name in ["ask", "write", "spellcheck", "inline"]:
+            let picked = self.mode(name)
+            if picked.chosen() and not known_provider(picked.provider):
+                error(invalid, "Unknown provider in " + name + ".provider = \"" + picked.provider + "\"; use openrouter or claude_code")
 
-    ## The raw "provider/model" a role is bound to, or "" when unset.
-    pub func role(self, name: str) -> str:
+    ## The settings for one mode ("ask", "write", "spellcheck", "inline"); an empty
+    ## Mode for any other name.
+    pub func mode(self, name: str) -> Mode:
         if name == "ask":
             return self.ask
         if name == "write":
@@ -75,64 +96,45 @@ pub class AiConfig:
             return self.spellcheck
         if name == "inline":
             return self.inline
-        return ""
+        return Mode()
 
     pub func provider(self, name: str) -> Provider?:
-        let which = provider_of(self.role(name))
+        let which = self.mode(name).provider
         if which == "openrouter":
             return self.openrouter
         if which == "claude_code":
             return self.claude_code
         return none
 
-    ## A role is ready when it names a model and that model's provider has a
+    ## A mode is ready when it names a model and that model's provider has a
     ## declared credential. It still may fail at request time if the key is unset.
     pub func ready(self, name: str) -> bool:
-        if self.role(name) == "":
+        if not self.mode(name).chosen():
             return false
         let provider = self.provider(name) else return false
         return provider.configured()
 
-## The provider segment of a "provider/model" value: the text before the first
-## slash, or the whole value when it has none.
-pub func provider_of(value: str) -> str:
-    var index = 0
-    for character in value:
-        if character == "/":
-            return value[0..<index]
-        index += 1
-    return value
-
-## The model segment of a "provider/model" value: everything after the first
-## slash, or "" when the value is a bare provider name.
-pub func model_of(value: str) -> str:
-    var index = 0
-    for character in value:
-        if character == "/":
-            return value[index + 1..<value.length]
-        index += 1
-    return ""
+func read_mode(table: Table, name: str) -> Mode!:
+    return Mode(table.string(name + ".provider", "openrouter"), table.string(name + ".model", ""), table.string(name + ".system", ""))
 
 ## The starter `ai.toml`, created once and never rewritten. It carries no key: a
-## fresh install has every role unset and points OpenRouter at an env variable.
+## fresh install has every mode unset and points OpenRouter at an env variable.
 pub func defaults() -> str:
-    return "# luced AI configuration. Keep this file private; it can hold API keys.\n# Each role is \"provider/model\"; providers are openrouter and claude_code.\n\n[models]\nask = \"\"\nwrite = \"\"\nspellcheck = \"\"\ninline = \"\"\n\n[openrouter]\n# Set api_key here, or leave it empty and export the key_env variable.\napi_key = \"\"\nkey_env = \"OPENROUTER_API_KEY\"\nbase_url = \"https://openrouter.ai/api/v1\"\n\n[claude_code]\ncommand = \"claude\"\n"
+    return "# luced AI configuration. Keep this file private; it can hold API keys.\n# Each mode has a provider, a model id, and an optional system prompt.\n# Providers are openrouter and claude_code; model is that provider's own id.\n\n[ask]\nprovider = \"openrouter\"\nmodel = \"\"\nsystem = \"\"\n\n[write]\nprovider = \"openrouter\"\nmodel = \"\"\nsystem = \"\"\n\n[spellcheck]\nprovider = \"openrouter\"\nmodel = \"\"\nsystem = \"\"\n\n[inline]\nprovider = \"openrouter\"\nmodel = \"\"\nsystem = \"\"\n\n[openrouter]\n# Set api_key here, or leave it empty and export the key_env variable.\napi_key = \"\"\nkey_env = \"OPENROUTER_API_KEY\"\nbase_url = \"https://openrouter.ai/api/v1\"\n\n[claude_code]\ncommand = \"claude\"\n"
 
-test "ai config parses roles and providers and reports readiness":
-    let text = defaults()
-    let config = AiConfig(text)
-    assert(config.ask == "" and not config.ready("ask"))
+test "ai config parses modes, prompts and providers":
+    let config = AiConfig(defaults())
+    assert(config.ask.provider == "openrouter" and config.ask.model == "" and not config.ready("ask"))
     assert(config.openrouter.key_env == "OPENROUTER_API_KEY" and config.openrouter.configured())
     assert(config.claude_code.command == "claude" and config.claude_code.configured())
-    let filled = AiConfig("[models]\nask = \"openrouter/anthropic/claude-opus\"\ninline = \"claude_code/sonnet\"\n[openrouter]\napi_key = \"sk-test\"\n")
-    assert(provider_of(filled.ask) == "openrouter" and model_of(filled.ask) == "anthropic/claude-opus")
-    assert(filled.ready("ask"))
-    assert(model_of(filled.inline) == "sonnet" and filled.ready("inline"))
-    assert(provider_of("claude_code") == "claude_code" and model_of("claude_code") == "")
+    let filled = AiConfig("[ask]\nmodel = \"deepseek/deepseek-v4.1-flash\"\nsystem = \"You are terse.\"\n[inline]\nprovider = \"claude_code\"\nmodel = \"sonnet\"\n[openrouter]\napi_key = \"sk-test\"\n")
+    assert(filled.ask.provider == "openrouter" and filled.ask.model == "deepseek/deepseek-v4.1-flash")
+    assert(filled.ask.system == "You are terse." and filled.ready("ask"))
+    assert(filled.inline.provider == "claude_code" and filled.ready("inline"))
 
 test "ai config rejects unknown providers and stray keys":
     var refused = false
-    discard(AiConfig("[models]\nask = \"mistral/large\"\n") catch failure:
+    discard(AiConfig("[ask]\nprovider = \"mistral\"\nmodel = \"large\"\n") catch failure:
         refused = failure.code == invalid
         recover AiConfig())
     assert(refused)

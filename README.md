@@ -11,13 +11,28 @@ and edit flows build on this and land in later modules.
 
 ## Configuration
 
+Each **mode** (`ask`, `write`, `spellcheck`, `inline`) is its own table with a
+`provider`, a `model` and an optional `system` prompt. `model` is the provider's
+own id and may contain slashes (an OpenRouter id such as `deepseek/deepseek-chat`).
+
 ```toml
-[models]
-# Each role is "provider/model". Providers: openrouter, claude_code.
-ask        = "openrouter/anthropic/claude-opus"
-write      = "openrouter/anthropic/claude-sonnet"
-spellcheck = "openrouter/openai/gpt-4o-mini"
-inline     = "claude_code/sonnet"
+[ask]
+provider = "openrouter"
+model    = "deepseek/deepseek-chat"
+system   = "You are a concise coding assistant."
+
+[write]
+provider = "openrouter"
+model    = "anthropic/claude-sonnet"
+system   = ""
+
+[spellcheck]
+provider = "openrouter"
+model    = "openai/gpt-4o-mini"
+
+[inline]
+provider = "claude_code"
+model    = "sonnet"
 
 [openrouter]
 api_key  = ""                       # a literal key, or leave empty and use key_env
@@ -29,16 +44,16 @@ command = "claude"                  # the local Claude Code CLI on PATH
 ```
 
 `AiConfig(source)` validates the schema up front, like the editor's other settings:
-unknown tables, unknown keys, and a role naming an unknown provider are errors, not
-silently ignored. Every role is optional and unset by default.
+unknown tables, unknown keys, and a mode naming an unknown provider are errors, not
+silently ignored. `provider` defaults to `openrouter`; every mode is optional and
+its model is unset by default.
 
-- `role(name)` returns the raw `"provider/model"` for `ask` / `write` /
-  `spellcheck` / `inline`, or `""`.
-- `provider(name)` returns the `Provider` a role resolves to.
-- `ready(name)` is true when a role names a model **and** that provider has a
+- `mode(name)` returns the `Mode` (`provider`, `model`, `system`) for `ask` /
+  `write` / `spellcheck` / `inline`, an empty Mode otherwise.
+- `provider(name)` returns the `Provider` a mode resolves to.
+- `ready(name)` is true when a mode names a model **and** that provider has a
   declared credential. It may still fail at request time if the environment
   variable is unset.
-- `provider_of(value)` / `model_of(value)` split a `"provider/model"` string.
 
 Table headers are flat (`[openrouter]`, not `[providers.openrouter]`) because the
 shared TOML reader accepts only bare table names.
