@@ -13,6 +13,19 @@ pub let invalid: ErrorCode = ErrorCode.package(310)
 pub func known_provider(name: str) -> bool:
     return name == "openrouter" or name == "claude_code"
 
+## The built-in system prompt for a mode, used when the user leaves `system` blank. Each
+## states the task plainly so the model answers directly rather than exploring with tools.
+pub func default_system(name: str) -> str:
+    if name == "spellcheck":
+        return "You are a spelling and grammar corrector inside a code editor. The user message is text to correct. Reply with ONLY the corrected text and nothing else — no explanation, no code fences. Do not call any tools."
+    if name == "write":
+        return "You are a writing assistant inside a code editor. The user describes a change; any selected text follows after a marker. Reply with ONLY the revised text meant to replace the selection — no commentary, no code fences. Read a file with the tools only if you truly need context."
+    if name == "ask":
+        return "You are a concise coding assistant inside the luced editor. Answer the user's question about their project. Use the read_file, list_dir and find_text tools to inspect files when it helps, then give a direct, focused answer."
+    if name == "inline":
+        return "You complete code at the cursor. Reply with ONLY the code to insert — no explanation, no code fences. Do not call any tools."
+    return ""
+
 ## One mode's settings: its provider (default openrouter), the model that answers
 ## it, and the system prompt prepended to each request. `model` is the provider's
 ## own id and may contain slashes (an OpenRouter id like "deepseek/deepseek-chat").
@@ -86,8 +99,15 @@ pub class AiConfig:
                 error(invalid, "Unknown provider in " + name + ".provider = \"" + picked.provider + "\"; use openrouter or claude_code")
 
     ## The settings for one mode ("ask", "write", "spellcheck", "inline"); an empty
-    ## Mode for any other name.
+    ## Mode for any other name. When the configured system prompt is blank, a sensible
+    ## default is supplied so the model does the task instead of wandering through tools.
     pub func mode(self, name: str) -> Mode:
+        let picked = self.mode_config(name)
+        if picked.system != "":
+            return picked
+        return Mode(provider = picked.provider, model = picked.model, system = default_system(name))
+
+    func mode_config(self, name: str) -> Mode:
         if name == "ask":
             return self.ask
         if name == "write":
