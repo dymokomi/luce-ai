@@ -11,6 +11,7 @@ import sync
 import interop
 import json
 import https
+import window
 import luce_ai.openrouter as openrouter
 
 var lock: sync.Mutex
@@ -161,6 +162,11 @@ func worker(context: void*?):
     finished = true
     running = false
     lock.unlock()
+    # Wake the UI's blocked event loop so it delivers this turn at once, instead of
+    # waiting for the next poll. Safe from this worker thread; a failure just falls
+    # back to the loop's normal timer wake.
+    window.wake() catch failure:
+        return
 
 ## Whether this turn has finished (poll from the UI between beats).
 pub func done() -> bool:
