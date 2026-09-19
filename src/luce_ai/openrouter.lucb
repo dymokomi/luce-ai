@@ -25,13 +25,13 @@ func fail(text: const u8[], count: usize) -> !:
 let we1_x: u8[32] = [0x6f, 0xcd, 0x3a, 0xfe, 0x67, 0x57, 0x47, 0x4c, 0x21, 0x03, 0x85, 0x40, 0xc2, 0x47, 0x5d, 0xbb, 0x58, 0x47, 0x0f, 0x40, 0xc1, 0x5c, 0x17, 0x85, 0xc6, 0x19, 0x37, 0xe7, 0xd5, 0x7c, 0xed, 0x86]
 let we1_y: u8[32] = [0x4b, 0x9b, 0x81, 0xd9, 0xd7, 0x1a, 0x13, 0xa5, 0x0a, 0x03, 0xf8, 0x98, 0xc4, 0xc6, 0xe8, 0x9e, 0xff, 0x10, 0x59, 0x8f, 0x2c, 0x26, 0x98, 0xf5, 0xe6, 0x26, 0x25, 0xbb, 0x0f, 0x02, 0xfa, 0x56]
 
-func put_str(buf: u8[], pos: usize*, s: str):
+pub func put_str(buf: u8[], pos: usize*, s: str):
     for i in 0..<s.length:
         buf[*pos + i] = s.bytes[i]
     *pos += s.length
 
 ## Append `s` as the interior of a JSON string, escaping what must be escaped.
-func put_json(buf: u8[], pos: usize*, s: str):
+pub func put_json(buf: u8[], pos: usize*, s: str):
     for i in 0..<s.length:
         let c = s.bytes[i]
         if c == 34 or c == 92:
@@ -82,14 +82,22 @@ func extract_error(body: str, out: u8[], out_len: usize*) -> bool!:
     write_msg(out, out_len, text)
     return true
 
-func write_msg(out: u8[], out_len: usize*, s: str):
+pub func write_msg(out: u8[], out_len: usize*, s: str):
     let n = s.length if s.length < out.length else out.length
     for i in 0..<n:
         out[i] = s.bytes[i]
     *out_len = n
 
-func empty_response() -> https.Response:
-    return https.Response(status = 0, length = 0)
+## Send a chat-completions POST with the bearer key, pinning WE1 as the issuer. Fills
+## `output` with the response body and returns the HTTP status; the one place the
+## endpoint and trust anchor live, shared by the simple client and the agent.
+pub func post(api_key: str, body: const u8[], output: u8[]) -> https.Response!:
+    var auth: u8[1200]
+    var ap: usize = 0
+    put_str(auth, &ap, "Bearer ")
+    put_str(auth, &ap, api_key)
+    return try https.fetch("openrouter.ai", 443, we1_x, we1_y, "POST", "/api/v1/chat/completions",
+        (str)auth[..<ap], "application/json", body, output)
 
 ## Ask a model for a completion, writing the reply into `out` and its length into
 ## `out_len`. `ok` is set when the model answered; otherwise `out` holds an error
@@ -115,18 +123,9 @@ pub func complete_into(api_key: str, model: str, system: str, prompt: str, out: 
     put_str(body, &bp, "{\"role\":\"user\",\"content\":\"")
     put_json(body, &bp, prompt)
     put_str(body, &bp, "\"}]}")
-    var auth: u8[512]
-    var ap: usize = 0
-    put_str(auth, &ap, "Bearer ")
-    put_str(auth, &ap, api_key)
     var response: u8[65536]
-    var failed = false
-    let result = https.fetch("openrouter.ai", 443, we1_x, we1_y, "POST", "/api/v1/chat/completions",
-        (str)auth[..<ap], "application/json", body[..<bp], response) catch failure:
+    let result = post(api_key, body[..<bp], response) catch failure:
         write_msg(out, out_len, failure.message)
-        failed = true
-        recover empty_response()
-    if failed:
         return
     if result.status != 200:
         let shown = extract_error((str)response[..<result.length], out, out_len) catch failure:

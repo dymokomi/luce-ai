@@ -1,0 +1,301 @@
+## The tool-using side of the OpenRouter client. It keeps a running conversation and,
+## each turn, sends it with a caller-supplied tool schema. The model either answers or
+## asks to call tools; this module only transports and parses JSON — it never decides
+## what a tool does or runs one. The editor (luced) owns the tools, executes them on
+## the main thread (so a tool may edit a document), feeds the results back with
+## add_tool_result, and drives the next turn. One request runs at a time on a worker
+## thread; the reply is polled with done() and read on the main thread with finish().
+## Only strings and integers cross to Luce, because the JSON decoder is Base-only.
+import thread
+import sync
+import interop
+import json
+import https
+import luce_ai.openrouter as openrouter
+
+var lock: sync.Mutex
+var running: bool = false
+var finished: bool = false
+var net_ok: bool = false
+
+## The messages array's interior: message objects joined by commas, wrapped in `[]`
+## only when the request is built. Grows as the conversation and tool results build up.
+var convo: u8[262144]
+var convo_len: usize = 0
+var msg_count: usize = 0
+var tools_buf: u8[16384]
+var tools_len: usize = 0
+
+var key_buf: u8[1200]
+var key_len: usize = 0
+var model_buf: u8[256]
+var model_len: usize = 0
+var body_buf: u8[300000]
+var resp: u8[262144]
+var resp_len: usize = 0
+var resp_status: u16 = 0
+var error_buf: u8[2048]
+var error_len: usize = 0
+var reply_buf: u8[65536]
+var reply_len: usize = 0
+
+## Tool calls parsed from the last turn, copied out of the decoded document so the
+## accessors need no live document. Eight is more than a turn ever asks for at once.
+var tc_count: i64 = 0
+var tc_id: u8[1024]
+var tc_id_len: usize[8]
+var tc_name: u8[512]
+var tc_name_len: usize[8]
+var tc_args: u8[65536]
+var tc_args_len: usize[8]
+
+func copy_into(buffer: u8[], length: usize*, s: str):
+    let n = s.length if s.length < buffer.length else buffer.length
+    for i in 0..<n:
+        buffer[i] = s.bytes[i]
+    *length = n
+
+func copy_slot(buffer: u8[], offset: usize, length: usize*, cap: usize, s: str):
+    let n = s.length if s.length < cap else cap
+    for i in 0..<n:
+        buffer[offset + i] = s.bytes[i]
+    *length = n
+
+## Append raw JSON structure to the conversation, refusing to overrun the buffer.
+func put_convo(s: str) -> bool:
+    if convo_len + s.length > convo.length:
+        return false
+    for i in 0..<s.length:
+        convo[convo_len + i] = s.bytes[i]
+    convo_len += s.length
+    return true
+
+## Append `s` as an escaped JSON string interior. Reserves the worst-case expansion.
+func put_convo_json(s: str) -> bool:
+    if convo_len + 2 * s.length + 8 > convo.length:
+        return false
+    var pos = convo_len
+    openrouter.put_json(convo, &pos, s)
+    convo_len = pos
+    return true
+
+func member_text(value: json.View, key: str) -> str:
+    let member = value.member(key) else return ""
+    return member.text() else ""
+
+## Start a fresh conversation with an optional system prompt, the user's message, and
+## the tool schema (a JSON array body) the model may call this session.
+pub func reset(system: str, prompt: str, tools_json: str):
+    convo_len = 0
+    msg_count = 0
+    copy_into(tools_buf, &tools_len, tools_json)
+    if system.length > 0:
+        discard(put_convo("{\"role\":\"system\",\"content\":\""))
+        discard(put_convo_json(system))
+        discard(put_convo("\"}"))
+        msg_count += 1
+    if msg_count > 0:
+        discard(put_convo(","))
+    discard(put_convo("{\"role\":\"user\",\"content\":\""))
+    discard(put_convo_json(prompt))
+    discard(put_convo("\"}"))
+    msg_count += 1
+
+## Record a tool's output as a tool-role message the next turn will send back.
+pub func add_tool_result(id: str, content: str):
+    if msg_count > 0:
+        discard(put_convo(","))
+    discard(put_convo("{\"role\":\"tool\",\"tool_call_id\":\""))
+    discard(put_convo_json(id))
+    discard(put_convo("\",\"content\":\""))
+    discard(put_convo_json(content))
+    discard(put_convo("\"}"))
+    msg_count += 1
+
+## Start one turn unless one is already running. Returns whether it started.
+pub func begin(key: str, model: str) -> bool:
+    lock.lock()
+    if running:
+        lock.unlock()
+        return false
+    copy_into(key_buf, &key_len, key)
+    copy_into(model_buf, &model_len, model)
+    running = true
+    finished = false
+    net_ok = false
+    lock.unlock()
+    let handle = thread.spawn(worker, none, stack = 2097152) catch failure:
+        lock.lock()
+        running = false
+        lock.unlock()
+        return false
+    handle.detach()
+    return true
+
+func worker(context: void*?):
+    discard(context)
+    var bp: usize = 0
+    openrouter.put_str(body_buf, &bp, "{\"model\":\"")
+    openrouter.put_json(body_buf, &bp, (str)model_buf[..<model_len])
+    openrouter.put_str(body_buf, &bp, "\",\"messages\":[")
+    for i in 0..<convo_len:
+        body_buf[bp + i] = convo[i]
+    bp += convo_len
+    openrouter.put_str(body_buf, &bp, "],\"tools\":[")
+    for i in 0..<tools_len:
+        body_buf[bp + i] = tools_buf[i]
+    bp += tools_len
+    openrouter.put_str(body_buf, &bp, "],\"tool_choice\":\"auto\"}")
+    var got = true
+    let result = openrouter.post((str)key_buf[..<key_len], body_buf[..<bp], resp) catch failure:
+        openrouter.write_msg(error_buf, &error_len, failure.message)
+        got = false
+        recover https.Response(status = 0, length = 0)
+    lock.lock()
+    if got:
+        resp_len = result.length
+        resp_status = result.status
+        net_ok = true
+    else:
+        net_ok = false
+    finished = true
+    running = false
+    lock.unlock()
+
+## Whether this turn has finished (poll from the UI between beats).
+pub func done() -> bool:
+    lock.lock()
+    let value = finished
+    lock.unlock()
+    return value
+
+func fail_reply(message: str) -> i64:
+    openrouter.write_msg(reply_buf, &reply_len, message)
+    return -1
+
+## Parse the finished turn on the main thread. Returns 0 when the model gave a final
+## answer (read it with reply), 1 when it asked to call tools (drive them with the
+## tool_* accessors, then add_tool_result and begin again), or -1 on an error whose
+## message reply returns. Appends the assistant message so the next turn has context.
+pub func finish() -> i64!:
+    lock.lock()
+    let ok_net = net_ok
+    let status = resp_status
+    let length = resp_len
+    lock.unlock()
+    if not ok_net:
+        openrouter.write_msg(reply_buf, &reply_len, (str)error_buf[..<error_len])
+        return -1
+    let document = try json.decode((str)resp[..<length])
+    defer document.release()
+    let root = (try document.get()).root()
+    if status != 200:
+        let problem = root.member("error") else return fail_reply("OpenRouter request was rejected.")
+        let message = problem.member("message") else return fail_reply("OpenRouter request was rejected.")
+        let text = message.text() else return fail_reply("OpenRouter request was rejected.")
+        return fail_reply(text)
+    let choices = root.member("choices") else return fail_reply("No choices in the response.")
+    let first = choices.at(0) else return fail_reply("No choice in the response.")
+    let message = first.member("message") else return fail_reply("No message in the response.")
+    if let calls = message.member("tool_calls"):
+        if calls.length() > 0:
+            append_assistant(message)
+            extract_tools(calls)
+            return 1
+    let content = message.member("content") else return fail_reply("No content in the response.")
+    let text = content.text() else return fail_reply("No content in the response.")
+    openrouter.write_msg(reply_buf, &reply_len, text)
+    return 0
+
+## Re-serialise the assistant message (its content and any tool calls) into the
+## conversation, so the provider — which keeps no state — sees it on the next turn.
+func append_assistant(message: json.View):
+    if msg_count > 0:
+        discard(put_convo(","))
+    discard(put_convo("{\"role\":\"assistant\",\"content\":"))
+    var has_content = false
+    if let content = message.member("content"):
+        if let text = content.text():
+            discard(put_convo("\""))
+            discard(put_convo_json(text))
+            discard(put_convo("\""))
+            has_content = true
+    if not has_content:
+        discard(put_convo("null"))
+    if let calls = message.member("tool_calls"):
+        discard(put_convo(",\"tool_calls\":["))
+        var i: usize = 0
+        while i < calls.length():
+            if i > 0:
+                discard(put_convo(","))
+            if let call = calls.at(i):
+                discard(put_convo("{\"id\":\""))
+                discard(put_convo_json(member_text(call, "id")))
+                discard(put_convo("\",\"type\":\"function\",\"function\":{\"name\":\""))
+                if let function = call.member("function"):
+                    discard(put_convo_json(member_text(function, "name")))
+                    discard(put_convo("\",\"arguments\":\""))
+                    discard(put_convo_json(member_text(function, "arguments")))
+                else:
+                    discard(put_convo("\",\"arguments\":\""))
+                discard(put_convo("\"}}"))
+            i += 1
+        discard(put_convo("]"))
+    discard(put_convo("}"))
+    msg_count += 1
+
+## Copy each tool call's id, name and raw arguments string into the slot buffers.
+func extract_tools(calls: json.View):
+    var n = calls.length()
+    if n > 8:
+        n = 8
+    tc_count = (i64)n
+    for i in 0..<n:
+        if let call = calls.at(i):
+            copy_slot(tc_id, i * 128, &tc_id_len[i], 128, member_text(call, "id"))
+            if let function = call.member("function"):
+                copy_slot(tc_name, i * 64, &tc_name_len[i], 64, member_text(function, "name"))
+                copy_slot(tc_args, i * 8192, &tc_args_len[i], 8192, member_text(function, "arguments"))
+            else:
+                tc_name_len[i] = 0
+                tc_args_len[i] = 0
+        else:
+            tc_id_len[i] = 0
+            tc_name_len[i] = 0
+            tc_args_len[i] = 0
+
+## The final answer, or the error message when finish returned -1.
+pub func reply() -> interop.Owned[str]!:
+    return try interop.copy_text((str)reply_buf[..<reply_len])
+
+## How many tools the model asked to call this turn.
+pub func tool_count() -> i64:
+    return tc_count
+
+## The provider's id for tool call `index`, needed to match its result back.
+pub func tool_id(index: i64) -> interop.Owned[str]!:
+    if index < 0 or index >= tc_count:
+        return try interop.copy_text("")
+    let i = (usize)index
+    return try interop.copy_text((str)tc_id[i * 128 ..< i * 128 + tc_id_len[i]])
+
+## The function name of tool call `index`.
+pub func tool_name(index: i64) -> interop.Owned[str]!:
+    if index < 0 or index >= tc_count:
+        return try interop.copy_text("")
+    let i = (usize)index
+    return try interop.copy_text((str)tc_name[i * 64 ..< i * 64 + tc_name_len[i]])
+
+## The string value of argument `key` for tool call `index`, or empty if absent. The
+## model returns arguments as a JSON string, so decode that string and read the field.
+pub func tool_arg(index: i64, key: str) -> interop.Owned[str]!:
+    if index < 0 or index >= tc_count:
+        return try interop.copy_text("")
+    let i = (usize)index
+    let arguments = (str)tc_args[i * 8192 ..< i * 8192 + tc_args_len[i]]
+    let document = try json.decode(arguments)
+    defer document.release()
+    let root = (try document.get()).root()
+    let field = root.member(key) else return try interop.copy_text("")
+    let text = field.text() else return try interop.copy_text("")
+    return try interop.copy_text(text)
