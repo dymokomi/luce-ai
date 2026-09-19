@@ -1,0 +1,143 @@
+## AI configuration: which model answers each role, and how to reach each
+## provider. The schema is validated up front, like the editor's other settings,
+## and holds no network logic — credentials are stored, not resolved here, so a
+## key can be read from the environment only when a request is actually made.
+from toml import Table
+
+## Configuration that does not match the declared AI schema.
+pub let invalid: ErrorCode = ErrorCode.package(310)
+
+## The providers a model role may name. Kept small on purpose; adding a provider
+## is a deliberate change, not an open set.
+pub func known_provider(name: str) -> bool:
+    return name == "openrouter" or name == "claude_code"
+
+## How to reach one provider. A credential may be a literal `api_key` or the name
+## of an environment variable in `key_env`; `command` names a local CLI provider.
+pub class Provider:
+    pub let name: str
+    pub let api_key: str
+    pub let key_env: str
+    pub let base_url: str
+    pub let command: str
+
+    pub func init(self, name: str, api_key: str = "", key_env: str = "", base_url: str = "", command: str = ""):
+        self.name = name
+        self.api_key = api_key
+        self.key_env = key_env
+        self.base_url = base_url
+        self.command = command
+
+    ## Whether some credential source is declared. Whether it actually resolves
+    ## (an environment variable being set, a command being on PATH) is a runtime
+    ## question answered when a request is made, not here.
+    pub func configured(self) -> bool:
+        return self.api_key != "" or self.key_env != "" or self.command != ""
+
+## The AI settings: a model per role and the known providers' details.
+pub class AiConfig:
+    pub let ask: str
+    pub let write: str
+    pub let spellcheck: str
+    pub let inline: str
+    pub let openrouter: Provider
+    pub let claude_code: Provider
+
+    pub func init(self, source: str = "") -> unit!:
+        let table = Table(source)
+        table.check_within([
+            "models.ask", "models.write", "models.spellcheck", "models.inline",
+            "openrouter.api_key", "openrouter.key_env", "openrouter.base_url",
+            "claude_code.command", "claude_code.model"], [])
+        self.ask = table.string("models.ask", "")
+        self.write = table.string("models.write", "")
+        self.spellcheck = table.string("models.spellcheck", "")
+        self.inline = table.string("models.inline", "")
+        self.openrouter = Provider("openrouter",
+            api_key = table.string("openrouter.api_key", ""),
+            key_env = table.string("openrouter.key_env", ""),
+            base_url = table.string("openrouter.base_url", "https://openrouter.ai/api/v1"))
+        self.claude_code = Provider("claude_code",
+            command = table.string("claude_code.command", "claude"),
+            key_env = "")
+        for role in ["ask", "write", "spellcheck", "inline"]:
+            let value = self.role(role)
+            if value != "" and not known_provider(provider_of(value)):
+                error(invalid, "Unknown provider in " + role + " = \"" + value + "\"; use openrouter or claude_code")
+
+    ## The raw "provider/model" a role is bound to, or "" when unset.
+    pub func role(self, name: str) -> str:
+        if name == "ask":
+            return self.ask
+        if name == "write":
+            return self.write
+        if name == "spellcheck":
+            return self.spellcheck
+        if name == "inline":
+            return self.inline
+        return ""
+
+    pub func provider(self, name: str) -> Provider?:
+        let which = provider_of(self.role(name))
+        if which == "openrouter":
+            return self.openrouter
+        if which == "claude_code":
+            return self.claude_code
+        return none
+
+    ## A role is ready when it names a model and that model's provider has a
+    ## declared credential. It still may fail at request time if the key is unset.
+    pub func ready(self, name: str) -> bool:
+        if self.role(name) == "":
+            return false
+        let provider = self.provider(name) else return false
+        return provider.configured()
+
+## The provider segment of a "provider/model" value: the text before the first
+## slash, or the whole value when it has none.
+pub func provider_of(value: str) -> str:
+    var index = 0
+    for character in value:
+        if character == "/":
+            return value[0..<index]
+        index += 1
+    return value
+
+## The model segment of a "provider/model" value: everything after the first
+## slash, or "" when the value is a bare provider name.
+pub func model_of(value: str) -> str:
+    var index = 0
+    for character in value:
+        if character == "/":
+            return value[index + 1..<value.length]
+        index += 1
+    return ""
+
+## The starter `ai.toml`, created once and never rewritten. It carries no key: a
+## fresh install has every role unset and points OpenRouter at an env variable.
+pub func defaults() -> str:
+    return "# luced AI configuration. Keep this file private; it can hold API keys.\n# Each role is \"provider/model\"; providers are openrouter and claude_code.\n\n[models]\nask = \"\"\nwrite = \"\"\nspellcheck = \"\"\ninline = \"\"\n\n[openrouter]\n# Set api_key here, or leave it empty and export the key_env variable.\napi_key = \"\"\nkey_env = \"OPENROUTER_API_KEY\"\nbase_url = \"https://openrouter.ai/api/v1\"\n\n[claude_code]\ncommand = \"claude\"\n"
+
+test "ai config parses roles and providers and reports readiness":
+    let text = defaults()
+    let config = AiConfig(text)
+    assert(config.ask == "" and not config.ready("ask"))
+    assert(config.openrouter.key_env == "OPENROUTER_API_KEY" and config.openrouter.configured())
+    assert(config.claude_code.command == "claude" and config.claude_code.configured())
+    let filled = AiConfig("[models]\nask = \"openrouter/anthropic/claude-opus\"\ninline = \"claude_code/sonnet\"\n[openrouter]\napi_key = \"sk-test\"\n")
+    assert(provider_of(filled.ask) == "openrouter" and model_of(filled.ask) == "anthropic/claude-opus")
+    assert(filled.ready("ask"))
+    assert(model_of(filled.inline) == "sonnet" and filled.ready("inline"))
+    assert(provider_of("claude_code") == "claude_code" and model_of("claude_code") == "")
+
+test "ai config rejects unknown providers and stray keys":
+    var refused = false
+    discard(AiConfig("[models]\nask = \"mistral/large\"\n") catch failure:
+        refused = failure.code == invalid
+        recover AiConfig())
+    assert(refused)
+    var stray = false
+    discard(AiConfig("[openrouter]\ntoken = \"x\"\n") catch failure:
+        stray = true
+        recover AiConfig())
+    assert(stray)

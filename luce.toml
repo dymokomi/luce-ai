@@ -1,0 +1,9 @@
+[package]
+name = "luce_ai"
+source = "src"
+
+[dependencies]
+luce_config = "../luce-config"
+
+[exports]
+config = "luce_ai.config"
