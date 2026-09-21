@@ -1,0 +1,42 @@
+#prisma 4.0
+def package "luce-ai" {
+    str owner = "dymokomi"
+    str version = "0.1.0"
+    str language = "luce-base"
+    str description = "AI support for the Luce editor ecosystem. This first module is the configuration layer: which model answers each role, and how to reach each provider."
+    str readme = "README.md"
+
+    def export "config" {
+        str module = "luce_ai.config"
+    }
+
+    def export "openrouter" {
+        str module = "luce_ai.openrouter"
+    }
+
+    def export "ai_task" {
+        str module = "luce_ai.task"
+    }
+
+    def export "ai_agent" {
+        str module = "luce_ai.agent"
+    }
+
+    def dependency "luce-config" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../luce-config"
+    }
+
+    def dependency "luce-http-client" {
+        str owner = "dymokomi"
+        str version = "^0.1.0"
+        str path = "../luce-http-client"
+    }
+
+    def dependency "luce-json" {
+        str owner = "dymokomi"
+        str version = "^0.2.0"
+        str path = "../luce-json"
+    }
+}
