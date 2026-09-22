@@ -1,7 +1,8 @@
 #prisma 4.0
 def package "luce-ai" {
     str owner = "dymokomi"
-    str version = "0.1.0"
+    str version = "0.1.1"
+    str kind = "package"
     str language = "luce-base"
     str description = "AI support for the Luce editor ecosystem. This first module is the configuration layer: which model answers each role, and how to reach each provider."
     str readme = "README.md"
