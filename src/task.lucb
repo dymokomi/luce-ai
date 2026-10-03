@@ -7,7 +7,7 @@
 import thread
 import sync
 import interop
-import luce_ai.openrouter as openrouter
+import openrouter
 
 pub let invalid = openrouter.invalid
 

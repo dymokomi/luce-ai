@@ -3,7 +3,7 @@
 ## validated up front, like the editor's other settings, and holds no network
 ## logic — credentials are stored, not resolved here, so a key is read from the
 ## environment only when a request is actually made.
-from toml import Table
+from luce_config.toml import Table
 
 ## Configuration that does not match the declared AI schema.
 pub let invalid: ErrorCode = ErrorCode.package(310)
