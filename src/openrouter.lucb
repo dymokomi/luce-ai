@@ -3,9 +3,9 @@
 ## (pinning Google's WE1 intermediate, which signs openrouter.ai's leaf), and
 ## returns the assistant's reply. String in, owned string out, so the Luce editor
 ## can call it like any other library function.
-import luce_http_client.secure as https
+from luce_http_client import secure as https
 import interop
-import luce_json.json
+from luce_json import json
 
 pub let invalid = https.invalid
 

@@ -9,9 +9,9 @@
 import thread
 import sync
 import interop
-import luce_json.json
-import luce_http_client.secure as https
-import luce_window.window
+from luce_json import json
+from luce_http_client import secure as https
+from luce_window import window
 import openrouter
 
 var lock: sync.Mutex
