@@ -154,12 +154,12 @@ test "ai config parses modes, prompts and providers":
 
 test "ai config rejects unknown providers and stray keys":
     var refused = false
-    discard(AiConfig("[ask]\nprovider = \"mistral\"\nmodel = \"large\"\n") catch failure:
+    _ = AiConfig("[ask]\nprovider = \"mistral\"\nmodel = \"large\"\n") catch failure:
         refused = failure.code == invalid
-        recover AiConfig())
+        recover AiConfig()
     assert(refused)
     var stray = false
-    discard(AiConfig("[openrouter]\ntoken = \"x\"\n") catch failure:
+    _ = AiConfig("[openrouter]\ntoken = \"x\"\n") catch failure:
         stray = true
-        recover AiConfig())
+        recover AiConfig()
     assert(stray)
