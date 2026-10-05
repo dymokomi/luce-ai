@@ -53,12 +53,12 @@ pub func begin(key: str, model: str, system: str, prompt: str) -> bool:
     return true
 
 func worker(context: void*?):
-    discard(context)
+    _ = context
     var staging: u8[65536]
     var length: usize = 0
     var ok = false
     openrouter.complete_into((str)key_buffer[..<key_len], (str)model_buffer[..<model_len],
-        (str)system_buffer[..<system_len], (str)prompt_buffer[..<prompt_len], staging, &length, &ok)
+                             (str)system_buffer[..<system_len], (str)prompt_buffer[..<prompt_len], staging, &length, &ok)
     lock.lock()
     for i in 0..<length:
         result_buffer[i] = staging[i]

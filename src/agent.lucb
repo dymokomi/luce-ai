@@ -91,26 +91,26 @@ pub func reset(system: str, prompt: str, tools_json: str):
     msg_count = 0
     copy_into(tools_buf, &tools_len, tools_json)
     if system.length > 0:
-        discard(put_convo("{\"role\":\"system\",\"content\":\""))
-        discard(put_convo_json(system))
-        discard(put_convo("\"}"))
+        _ = put_convo("{\"role\":\"system\",\"content\":\"")
+        _ = put_convo_json(system)
+        _ = put_convo("\"}")
         msg_count += 1
     if msg_count > 0:
-        discard(put_convo(","))
-    discard(put_convo("{\"role\":\"user\",\"content\":\""))
-    discard(put_convo_json(prompt))
-    discard(put_convo("\"}"))
+        _ = put_convo(",")
+    _ = put_convo("{\"role\":\"user\",\"content\":\"")
+    _ = put_convo_json(prompt)
+    _ = put_convo("\"}")
     msg_count += 1
 
 ## Record a tool's output as a tool-role message the next turn will send back.
 pub func add_tool_result(id: str, content: str):
     if msg_count > 0:
-        discard(put_convo(","))
-    discard(put_convo("{\"role\":\"tool\",\"tool_call_id\":\""))
-    discard(put_convo_json(id))
-    discard(put_convo("\",\"content\":\""))
-    discard(put_convo_json(content))
-    discard(put_convo("\"}"))
+        _ = put_convo(",")
+    _ = put_convo("{\"role\":\"tool\",\"tool_call_id\":\"")
+    _ = put_convo_json(id)
+    _ = put_convo("\",\"content\":\"")
+    _ = put_convo_json(content)
+    _ = put_convo("\"}")
     msg_count += 1
 
 ## Start one turn unless one is already running. Returns whether it started.
@@ -134,7 +134,7 @@ pub func begin(key: str, model: str) -> bool:
     return true
 
 func worker(context: void*?):
-    discard(context)
+    _ = context
     var bp: usize = 0
     openrouter.put_str(body_buf, &bp, "{\"model\":\"")
     openrouter.put_json(body_buf, &bp, (str)model_buf[..<model_len])
@@ -217,37 +217,37 @@ pub func finish() -> i64!:
 ## conversation, so the provider — which keeps no state — sees it on the next turn.
 func append_assistant(message: json.View):
     if msg_count > 0:
-        discard(put_convo(","))
-    discard(put_convo("{\"role\":\"assistant\",\"content\":"))
+        _ = put_convo(",")
+    _ = put_convo("{\"role\":\"assistant\",\"content\":")
     var has_content = false
     if let content = message.member("content"):
         if let text = content.text():
-            discard(put_convo("\""))
-            discard(put_convo_json(text))
-            discard(put_convo("\""))
+            _ = put_convo("\"")
+            _ = put_convo_json(text)
+            _ = put_convo("\"")
             has_content = true
     if not has_content:
-        discard(put_convo("null"))
+        _ = put_convo("null")
     if let calls = message.member("tool_calls"):
-        discard(put_convo(",\"tool_calls\":["))
+        _ = put_convo(",\"tool_calls\":[")
         var i: usize = 0
         while i < calls.length():
             if i > 0:
-                discard(put_convo(","))
+                _ = put_convo(",")
             if let call = calls.at(i):
-                discard(put_convo("{\"id\":\""))
-                discard(put_convo_json(member_text(call, "id")))
-                discard(put_convo("\",\"type\":\"function\",\"function\":{\"name\":\""))
+                _ = put_convo("{\"id\":\"")
+                _ = put_convo_json(member_text(call, "id"))
+                _ = put_convo("\",\"type\":\"function\",\"function\":{\"name\":\"")
                 if let function = call.member("function"):
-                    discard(put_convo_json(member_text(function, "name")))
-                    discard(put_convo("\",\"arguments\":\""))
-                    discard(put_convo_json(member_text(function, "arguments")))
+                    _ = put_convo_json(member_text(function, "name"))
+                    _ = put_convo("\",\"arguments\":\"")
+                    _ = put_convo_json(member_text(function, "arguments"))
                 else:
-                    discard(put_convo("\",\"arguments\":\""))
-                discard(put_convo("\"}}"))
+                    _ = put_convo("\",\"arguments\":\"")
+                _ = put_convo("\"}}")
             i += 1
-        discard(put_convo("]"))
-    discard(put_convo("}"))
+        _ = put_convo("]")
+    _ = put_convo("}")
     msg_count += 1
 
 ## Copy each tool call's id, name and raw arguments string into the slot buffers.
@@ -283,14 +283,14 @@ pub func tool_id(index: i64) -> interop.Owned[str]!:
     if index < 0 or index >= tc_count:
         return try interop.copy_text("")
     let i = (usize)index
-    return try interop.copy_text((str)tc_id[i * 128 ..< i * 128 + tc_id_len[i]])
+    return try interop.copy_text((str)tc_id[i * 128..<i * 128 + tc_id_len[i]])
 
 ## The function name of tool call `index`.
 pub func tool_name(index: i64) -> interop.Owned[str]!:
     if index < 0 or index >= tc_count:
         return try interop.copy_text("")
     let i = (usize)index
-    return try interop.copy_text((str)tc_name[i * 64 ..< i * 64 + tc_name_len[i]])
+    return try interop.copy_text((str)tc_name[i * 64..<i * 64 + tc_name_len[i]])
 
 ## The string value of argument `key` for tool call `index`, or empty if absent. The
 ## model returns arguments as a JSON string, so decode that string and read the field.
@@ -298,7 +298,7 @@ pub func tool_arg(index: i64, key: str) -> interop.Owned[str]!:
     if index < 0 or index >= tc_count:
         return try interop.copy_text("")
     let i = (usize)index
-    let arguments = (str)tc_args[i * 8192 ..< i * 8192 + tc_args_len[i]]
+    let arguments = (str)tc_args[i * 8192..<i * 8192 + tc_args_len[i]]
     let document = try json.decode(arguments)
     defer document.release()
     let root = (try document.get()).root()
