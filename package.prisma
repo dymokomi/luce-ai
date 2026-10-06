@@ -10,25 +10,21 @@ def package "luce-ai" {
 
     def dependency "luce-config" {
         str owner = "dymokomi"
-        str version = "^0.5.0"
         str path = "../luce-config"
     }
 
     def dependency "luce-http-client" {
         str owner = "dymokomi"
-        str version = "^0.5.0"
         str path = "../luce-http-client"
     }
 
     def dependency "luce-json" {
         str owner = "dymokomi"
-        str version = "^0.6.0"
         str path = "../luce-json"
     }
 
     def dependency "luce-window" {
         str owner = "dymokomi"
-        str version = "^0.6.1"
         str path = "../luce-window"
     }
 }
