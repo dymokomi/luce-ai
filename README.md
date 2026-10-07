@@ -61,7 +61,7 @@ shared TOML reader accepts only bare table names.
 ## Tests
 
 ```sh
-./test.sh
+luc test
 ```
 
 Runs the module's test blocks natively and in the C comparison build.
